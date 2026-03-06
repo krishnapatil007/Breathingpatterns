@@ -1,0 +1,167 @@
+from google.colab import drive
+drive.mount('/content/drive')
+
+
+import os
+import numpy as np
+import pandas as pd
+import pickle
+from scipy.signal import butter, filtfilt
+
+# HARD PATH 
+DATA_ROOT = "/content/drive/MyDrive/Colab Notebooks/breathing_project/Data"
+
+print("Using data root:", DATA_ROOT)
+print("Participants found:", os.listdir(DATA_ROOT))
+
+
+# FILTER CONFIG
+fs = 32
+lowcut = 0.17
+highcut = 0.4
+nyquist = fs / 2
+b, a = butter(4, [lowcut/nyquist, highcut/nyquist], btype='band')
+
+
+def load_signal(file_path):
+    df = pd.read_csv(
+        file_path,
+        sep=";",
+        skiprows=7,
+        header=None,
+        names=["timestamp", "value"]
+    )
+    df["timestamp"] = df["timestamp"].str.replace(",", ".", regex=False)
+    df["timestamp"] = pd.to_datetime(
+        df["timestamp"],
+        format="%d.%m.%Y %H:%M:%S.%f"
+    )
+    return df
+
+
+def load_events(file_path):
+    df = pd.read_csv(
+        file_path,
+        sep=";",
+        skiprows=5,
+        header=None,
+        names=["time_range", "duration", "event_type", "sleep_stage"]
+    )
+
+    df[["start_raw", "end_raw"]] = df["time_range"].str.split("-", expand=True)
+
+    df["start_raw"] = df["start_raw"].str.replace(",", ".", regex=False)
+    df["start_time"] = pd.to_datetime(
+        df["start_raw"],
+        format="%d.%m.%Y %H:%M:%S.%f"
+    )
+
+    df["date"] = df["start_time"].dt.strftime("%d.%m.%Y")
+    df["end_raw"] = df["end_raw"].str.replace(",", ".", regex=False)
+
+    df["end_time"] = pd.to_datetime(
+        df["date"] + " " + df["end_raw"],
+        format="%d.%m.%Y %H:%M:%S.%f"
+    )
+
+    return df
+
+
+all_X = []
+all_y = []
+participant_ids = []
+
+for participant in sorted(os.listdir(DATA_ROOT)):
+
+    participant_folder = os.path.join(DATA_ROOT, participant)
+
+    if not os.path.isdir(participant_folder):
+        continue
+
+    print("Processing:", participant)
+
+    files = os.listdir(participant_folder)
+
+    airflow_file = None
+    thoracic_file = None
+    events_file = None
+
+    for f in files:
+        name = f.lower()
+        if "flow events" in name:
+            events_file = f
+        elif "flow" in name and "event" not in name:
+            airflow_file = f
+        elif "thorac" in name:
+            thoracic_file = f
+
+    if None in [airflow_file, thoracic_file, events_file]:
+        print("Missing required files in:", participant)
+        continue
+
+    airflow_path = os.path.join(participant_folder, airflow_file)
+    thoracic_path = os.path.join(participant_folder, thoracic_file)
+    events_path = os.path.join(participant_folder, events_file)
+
+    df_airflow = load_signal(airflow_path)
+    df_thoracic = load_signal(thoracic_path)
+    df_events = load_events(events_path)
+
+    filtered_airflow = filtfilt(b, a, df_airflow["value"])
+    filtered_thoracic = filtfilt(b, a, df_thoracic["value"])
+
+    timestamps = df_airflow["timestamp"].values
+
+    window_size = 960
+    step_size = 480
+
+    for start in range(0, len(filtered_airflow) - window_size, step_size):
+
+        end = start + window_size
+        win_start = timestamps[start]
+        win_end = timestamps[end]
+
+        label = "Normal"
+
+        for _, event in df_events.iterrows():
+            overlap_start = max(win_start, event["start_time"])
+            overlap_end = min(win_end, event["end_time"])
+            delta = overlap_end - overlap_start
+            overlap = delta / np.timedelta64(1, 's')
+
+            if overlap > 15:
+                label = event["event_type"]
+                break
+
+        airflow_window = filtered_airflow[start:end]
+        thoracic_window = filtered_thoracic[start:end]
+
+        combined = np.vstack((airflow_window, thoracic_window))
+
+        all_X.append(combined)
+        all_y.append(label)
+        participant_ids.append(participant)
+
+X = np.array(all_X)
+y = np.array(all_y)
+participant_ids = np.array(participant_ids)
+
+print("Final X shape:", X.shape)
+print("Participants detected:", len(set(participant_ids)))
+
+DATASET_PATH = "/content/drive/MyDrive/Colab Notebooks/breathing_project/Dataset"
+
+os.makedirs(DATASET_PATH, exist_ok=True)
+
+dataset = {
+    "X": X,
+    "y": y,
+    "participant_ids": participant_ids
+}
+
+output_path = os.path.join(DATASET_PATH, "combined breathing_dataset.pkl")
+
+with open(output_path, "wb") as f:
+    pickle.dump(dataset, f)
+
+print("Dataset saved at:", output_path)

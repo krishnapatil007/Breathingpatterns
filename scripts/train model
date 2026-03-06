@@ -1,0 +1,121 @@
+from google.colab import drive
+drive.mount('/content/drive')
+
+import pickle
+output_path="/content/drive/MyDrive/Colab Notebooks/breathing_project/Dataset/combined breathing_dataset.pkl"
+
+with open(output_path, "rb") as f:
+    data = pickle.load(f)
+
+X = data["X"]
+y = data["y"]
+participant_ids = data["participant_ids"]
+
+print(X.shape)
+print(len(set(participant_ids)))
+from sklearn.preprocessing import LabelEncoder
+
+le = LabelEncoder()
+y_encoded = le.fit_transform(y)
+
+print("Classes:", le.classes_)
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.metrics import accuracy_score, precision_score, recall_score, confusion_matrix
+import numpy as np
+
+class SimpleCNN(nn.Module):
+    def __init__(self, num_classes):
+        super(SimpleCNN, self).__init__()
+
+        self.conv1 = nn.Conv1d(in_channels=2, out_channels=16, kernel_size=5)
+        self.pool = nn.MaxPool1d(2)
+        self.conv2 = nn.Conv1d(16, 32, kernel_size=5)
+
+        self.relu = nn.ReLU()
+        self.flatten = nn.Flatten()
+
+        # We will calculate this dynamically
+        self.fc1 = None
+        self.fc2 = None
+        self.num_classes = num_classes
+
+    def forward(self, x):
+
+        x = self.pool(self.relu(self.conv1(x)))
+        x = self.pool(self.relu(self.conv2(x)))
+
+        x = self.flatten(x)
+
+        # Lazy initialization of FC layers (to avoid dimension guessing)
+        if self.fc1 is None:
+            self.fc1 = nn.Linear(x.shape[1], 64).to(x.device)
+            self.fc2 = nn.Linear(64, self.num_classes).to(x.device)
+
+        x = self.relu(self.fc1(x))
+        x = self.fc2(x)
+
+        return x
+unique_participants = np.unique(participant_ids)
+
+all_fold_metrics = []
+
+for test_participant in unique_participants:
+
+    print("\nTesting on:", test_participant)
+
+    train_mask = participant_ids != test_participant
+    test_mask = participant_ids == test_participant
+
+    X_train = X[train_mask]
+    y_train = y_encoded[train_mask]
+
+    X_test = X[test_mask]
+    y_test = y_encoded[test_mask]
+
+    # Convert to torch tensors
+    X_train = torch.tensor(X_train, dtype=torch.float32)
+    y_train = torch.tensor(y_train, dtype=torch.long)
+
+    X_test = torch.tensor(X_test, dtype=torch.float32)
+    y_test = torch.tensor(y_test, dtype=torch.long)
+
+    model = SimpleCNN(num_classes=len(le.classes_))
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    # Training (minimal as assignment-level)
+    for epoch in range(5):
+        model.train()
+        optimizer.zero_grad()
+        outputs = model(X_train)
+        loss = criterion(outputs, y_train)
+        loss.backward()
+        optimizer.step()
+
+    # Evaluation
+    model.eval()
+    with torch.no_grad():
+        outputs = model(X_test)
+        _, preds = torch.max(outputs, 1)
+
+    acc = accuracy_score(y_test.numpy(), preds.numpy())
+    prec = precision_score(y_test.numpy(), preds.numpy(), average='macro', zero_division=0)
+    rec = recall_score(y_test.numpy(), preds.numpy(), average='macro', zero_division=0)
+    cm = confusion_matrix(y_test.numpy(), preds.numpy())
+
+    print("Accuracy:", acc)
+    print("Precision:", prec)
+    print("Recall:", rec)
+    print("Confusion Matrix:\n", cm)
+
+    all_fold_metrics.append((acc, prec, rec))
+
+avg_acc = np.mean([m[0] for m in all_fold_metrics])
+avg_prec = np.mean([m[1] for m in all_fold_metrics])
+avg_rec = np.mean([m[2] for m in all_fold_metrics])
+
+print("\n Average Accuracy:", avg_acc)
+print("Average Precision:", avg_prec)
+print("Average Recall:", avg_rec)

@@ -1,0 +1,9 @@
+Here is a clean requirements.txt  block you can copy-paste directly:
+
+numpy
+pandas
+scipy
+matplotlib
+scikit-learn
+torch
+
